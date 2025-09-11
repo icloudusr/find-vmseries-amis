@@ -136,6 +136,9 @@ def technical_filter(ec2c, candidate_types, ami):
     
     arch_needed = ami.get("Architecture", "x86_64")
     ena_needed = ami.get("EnaSupport", True)
+    
+    # ARM instances often have different vCPU minimums
+    min_vcpus = 1 if arch_needed == "arm64" else 2
 
     keep = set()
     batch = list(candidate_types)
@@ -149,15 +152,17 @@ def technical_filter(ec2c, candidate_types, ami):
             if ".metal" in t or family_name.startswith(("mac", "a1")):
                 continue
             
-            # Focus on core VM-Series families
+            # Focus on core VM-Series families (ARM and x86)
             if family_name not in CORE_VM_FAMILIES:
                 continue
                 
-            # Minimum requirements for VM-Series
-            if it.get("VCpuInfo", {}).get("DefaultVCpus", 0) < 2:
+            # Adjusted vCPU requirements
+            if it.get("VCpuInfo", {}).get("DefaultVCpus", 0) < min_vcpus:
                 continue
                 
-            if arch_needed not in set(it.get("ProcessorInfo", {}).get("SupportedArchitectures", [])):
+            # Check architecture compatibility
+            supported_archs = set(it.get("ProcessorInfo", {}).get("SupportedArchitectures", []))
+            if arch_needed not in supported_archs:
                 continue
                 
             if ena_needed and it.get("NetworkInfo", {}).get("EnaSupport", "unsupported") not in ("supported", "required"):
@@ -224,15 +229,22 @@ def format_families(types):
     return {f: sorted(sizes) for f, sizes in families.items()}
 
 def render_table(results):
-    """Render results as a table"""
-    header = f"{'PAN-OS':<12} {'AMI ID':<21} {'Product Code':<32} {'#Types':<7} {'Families→Sizes'}"
+    """Render results as a table with supported instances"""
+    header = f"{'PAN-OS':<12} {'AMI ID':<21} {'Product Code':<32} {'#Types':<7} {'Supported Instances'}"
     lines = [header, "-" * len(header)]
     
     for result in results:
+        # Show first line with summary
         families_str = ", ".join(f"{f}:{'/'.join(s)}" for f, s in result["families"].items())
         line = f"{result['version']:<12} {result['ami_id']:<21} {result['product_code']:<32} {result['count']:<7} {families_str}"
         lines.append(line)
         
+        # Show individual supported instances
+        if result.get("supported_instances"):
+            instances_str = ", ".join(sorted(result["supported_instances"]))
+            lines.append(f"{'':>73} Types: {instances_str}")
+        
+        # Show rejected instances if requested
         if result.get("rejected") and len(result["rejected"]) > 0:
             rejected_str = ", ".join(f"{k}({v})" for k, v in list(result["rejected"].items())[:10])
             lines.append(f"{'':>73} Rejected: {rejected_str}")
