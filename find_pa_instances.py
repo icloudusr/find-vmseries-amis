@@ -68,19 +68,32 @@ def ec2(region):
     return boto3.client("ec2", region_name=region, config=cfg)
 
 def resolve_az(ec2c, region, az_input):
-    if re.match(r"^[a-z]{2}-[a-z]+-\d[a-z]$", az_input):
-        return ("availability-zone", az_input)
-    if "-az" in az_input:
-        return ("availability-zone-id", az_input)
-    
-    resp = ec2c.describe_availability_zones(
-        AllAvailabilityZones=False,
-        Filters=[{"Name":"region-name","Values":[region]}]
-    )
-    for az in resp.get("AvailabilityZones", []):
-        if az_input in (az.get("ZoneName"), az.get("ZoneId")):
-            return ("availability-zone-id", az["ZoneId"]) if az_input == az.get("ZoneId") else ("availability-zone", az["ZoneName"])
-    raise ValueError(f"AZ not found in {region}: {az_input}")
+    """Validate AZ exists in the specified region"""
+    try:
+        resp = ec2c.describe_availability_zones(
+            AllAvailabilityZones=False,
+            Filters=[{"Name":"region-name","Values":[region]}]
+        )
+        available_azs = resp.get("AvailabilityZones", [])
+        
+        # Check if input matches any available AZ name or ID
+        for az in available_azs:
+            if az_input in (az.get("ZoneName"), az.get("ZoneId")):
+                if az_input == az.get("ZoneId"):
+                    return ("availability-zone-id", az["ZoneId"])
+                else:
+                    return ("availability-zone", az["ZoneName"])
+        
+        # If no match found, show available options
+        az_names = [az.get("ZoneName") for az in available_azs]
+        az_ids = [az.get("ZoneId") for az in available_azs]
+        
+        raise ValueError(f"AZ '{az_input}' not found in region {region}. "
+                        f"Available AZs: {', '.join(az_names)} "
+                        f"or IDs: {', '.join(az_ids)}")
+        
+    except botocore.exceptions.ClientError as e:
+        raise ValueError(f"Could not validate AZ in region {region}: {e}")
 
 def list_amis(ec2c, product_code, version_filter):
     name_filter = f"PA-VM*-AWS*{version_filter}*" if version_filter else "PA-VM*-AWS*"
@@ -113,7 +126,7 @@ def extract_product_code(ami):
     """Extract product code from AMI"""
     product_codes = ami.get("ProductCodes", [])
     if product_codes:
-        return product_codes[0].get("ProductCode", "unknown")
+        return product_codes[0].get("ProductCodeId", "unknown")  # Changed from ProductCode to ProductCodeId
     return "unknown"
 
 def technical_filter(ec2c, candidate_types, ami):
