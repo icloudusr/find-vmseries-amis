@@ -33,7 +33,10 @@ CORE_VM_FAMILIES = {
     "m5", "m5n", "m6i", "m6in", "m7i", 
     "r5", "r5n", "r6i", "r6in", "r7i",
     # ARM
-    "c6g", "c7g", "m6g", "m7g", "r6g", "r7g",
+    "c6g", "c7g", "c8g",  # ADD c8g
+    "m6g", "m7g", "m8g",  # ADD m8g  
+    "r6g", "r7g", "r8g",  # ADD r8g
+    "t4g",                # ADD t4g if you want burstable
 }
 
 VERSION_RE = re.compile(r"PA-VM(?:ARM)?-AWS[-_]?(\d+\.\d+(?:\.\w+)?)", re.IGNORECASE)
