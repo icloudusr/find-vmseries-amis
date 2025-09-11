@@ -330,6 +330,8 @@ def main():
             "product_code": product_code,
             "count": len(supported),
             "families": format_families(supported)
+            "supported_instances": supported  # ADD THIS LINE
+
         }
         
         if args.show_rejected and rejected:
