@@ -329,7 +329,7 @@ def main():
             "ami_id": ami_id,
             "product_code": product_code,
             "count": len(supported),
-            "families": format_families(supported)
+            "families": format_families(supported),
             "supported_instances": supported  # ADD THIS LINE
 
         }
