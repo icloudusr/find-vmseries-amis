@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+VERSION_RE = re.compile(r"PA-VM(?:ARM)?-AWS[-_]?(\d+\.\d+(?:\.\w+)?)", re.IGNORECASE)#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -8,7 +8,6 @@ Simplified version focusing on essential functionality.
 """
 
 import argparse, boto3, botocore, json, re, sys, threading, time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
 # -----------------------------
@@ -39,7 +38,17 @@ CORE_VM_FAMILIES = {
     "t4g",                # ADD t4g if you want burstable
 }
 
-VERSION_RE = re.compile(r"PA-VM(?:ARM)?-AWS[-_]?(\d+\.\d+(?:\.\w+)?)", re.IGNORECASE)
+def spinner(stop_event, message="Processing"):
+    """Simple spinner animation"""
+    chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    i = 0
+    while not stop_event.is_set():
+        sys.stderr.write(f'\r{message} {chars[i % len(chars)]}')
+        sys.stderr.flush()
+        i += 1
+        time.sleep(0.1)
+    sys.stderr.write('\r' + ' ' * (len(message) + 2) + '\r')
+    sys.stderr.flush()
 
 def parse_args():
     p = argparse.ArgumentParser(description="List VM-Series supported EC2 instance types per AMI in a Region/AZ.")
@@ -62,6 +71,10 @@ def parse_args():
                    help="Output format")
     p.add_argument("--show-rejected", action="store_true",
                    help="Show rejected instance types")
+    
+    # Debug option
+    p.add_argument("--debug", action="store_true",
+                   help="Enable debug output")
 
     return p.parse_args()
 
@@ -132,7 +145,7 @@ def extract_product_code(ami):
         return product_codes[0].get("ProductCodeId", "unknown")  # Changed from ProductCode to ProductCodeId
     return "unknown"
 
-def technical_filter(ec2c, candidate_types, ami):
+def technical_filter(ec2c, candidate_types, ami, debug=False):
     """Filter instance types using describe_instance_types"""
     if not candidate_types:
         return set()
@@ -172,6 +185,13 @@ def technical_filter(ec2c, candidate_types, ami):
                 continue
                 
             keep.add(t)
+    
+    if debug:
+        print(f"DEBUG: Technical filter: {len(candidate_types)} candidates -> {len(keep)} kept", file=sys.stderr)
+        if keep and debug:
+            sample = list(keep)[:5]
+            print(f"DEBUG: Sample kept types: {sample}", file=sys.stderr)
+    
     return keep
 
 def find_subnet_in_az(ec2c, loc_type, loc_value):
@@ -183,7 +203,7 @@ def find_subnet_in_az(ec2c, loc_type, loc_value):
     subs = resp.get("Subnets", [])
     return subs[0] if subs else None
 
-def validate_instances(ec2c, ami_id, types, subnet):
+def validate_instances(ec2c, ami_id, types, subnet, debug=False):
     """Validate instance types using DryRun"""
     vpc_id, subnet_id = subnet["VpcId"], subnet["SubnetId"]
     
@@ -193,8 +213,12 @@ def validate_instances(ec2c, ami_id, types, subnet):
             Filters=[{"Name":"group-name","Values":["default"]},{"Name":"vpc-id","Values":[vpc_id]}]
         )
         sg_id = sg_resp.get("SecurityGroups", [{}])[0].get("GroupId")
+        if debug:
+            print(f"DEBUG: Using security group {sg_id} in VPC {vpc_id}", file=sys.stderr)
     except:
         sg_id = None
+        if debug:
+            print(f"DEBUG: Could not get default security group", file=sys.stderr)
 
     supported = set()
     rejected = {}
@@ -220,6 +244,11 @@ def validate_instances(ec2c, ami_id, types, subnet):
                 supported.add(instance_type)
             else:
                 rejected[instance_type] = code
+
+    if debug:
+        print(f"DEBUG: Validation complete: {len(supported)} supported, {len(rejected)} rejected", file=sys.stderr)
+        if rejected and len(rejected) <= 5:
+            print(f"DEBUG: Sample rejected: {list(rejected.items())[:5]}", file=sys.stderr)
 
     return supported, rejected
 
@@ -282,6 +311,11 @@ def main():
     if not offered:
         sys.stderr.write("ERROR: No instance types offered in that AZ\n")
         sys.exit(2)
+    
+    if args.debug:
+        print(f"DEBUG: Found {len(offered)} instance types in {loc_value}", file=sys.stderr)
+        arm_types = [t for t in offered if any(t.startswith(f + ".") for f in ["c6g", "c7g", "c8g", "m6g", "m7g", "m8g", "r6g", "r7g", "r8g", "t4g"])]
+        print(f"DEBUG: ARM types available: {len(arm_types)}", file=sys.stderr)
 
     # Get product code
     product_code = PAN_PRODUCT_CODES.get(args.product)
@@ -294,6 +328,9 @@ def main():
     if not amis:
         sys.stderr.write("ERROR: No AMIs found. Check product subscription.\n")
         sys.exit(3)
+    
+    if args.debug:
+        print(f"DEBUG: Found {len(amis)} AMIs for product {args.product}", file=sys.stderr)
 
     # Setup validation if requested
     subnet = None
@@ -302,12 +339,17 @@ def main():
             try:
                 resp = ec2c.describe_subnets(SubnetIds=[args.subnet_id])
                 subnet = resp.get("Subnets", [{}])[0]
+                if args.debug:
+                    print(f"DEBUG: Using provided subnet {args.subnet_id}", file=sys.stderr)
             except:
                 sys.stderr.write("WARN: Invalid subnet ID, attempting auto-discovery\n")
         
         if not subnet:
             subnet = find_subnet_in_az(ec2c, loc_type, loc_value)
-            if not subnet:
+            if subnet:
+                if args.debug:
+                    print(f"DEBUG: Auto-discovered subnet {subnet['SubnetId']} in {loc_value}", file=sys.stderr)
+            else:
                 sys.stderr.write("WARN: No subnet found for validation, using technical filtering only\n")
 
     # Process each AMI
@@ -316,16 +358,20 @@ def main():
         ami_id = ami["ImageId"]
         version = extract_version(ami.get("Name", ""))
         product_code = extract_product_code(ami)
+        
+        if args.debug:
+            print(f"\nDEBUG: Processing AMI {ami_id} (PAN-OS {version})", file=sys.stderr)
+            print(f"DEBUG: AMI Architecture: {ami.get('Architecture', 'unknown')}", file=sys.stderr)
 
         # Technical filtering
-        candidates = technical_filter(ec2c, offered, ami)
+        candidates = technical_filter(ec2c, offered, ami, debug=args.debug)
         
         supported = candidates
         rejected = {}
         
         # Validation if enabled and subnet available
         if args.validate and subnet and candidates:
-            supported, rejected = validate_instances(ec2c, ami_id, candidates, subnet)
+            supported, rejected = validate_instances(ec2c, ami_id, candidates, subnet, debug=args.debug)
 
         result = {
             "version": version,
@@ -333,8 +379,7 @@ def main():
             "product_code": product_code,
             "count": len(supported),
             "families": format_families(supported),
-            "supported_instances": supported  # ADD THIS LINE
-
+            "supported_instances": list(supported)  # FIX: Convert set to list
         }
         
         if args.show_rejected and rejected:
